@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+import socket
 import sys
 import time
 from typing import Callable
@@ -32,10 +33,92 @@ DEFAULT_HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
+    ),
+    "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+    "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-fetch-dest": "document",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-site": "same-origin",
+    "sec-fetch-user": "?1",
+    "upgrade-insecure-requests": "1",
     "Referer": SIGN_PAGE_URL,
 }
+
+
+def check_network_connectivity(timeout: float = 5.0) -> dict[str, str]:
+    """Diagnose local egress IP, remote target DNS resolution, and TCP/HTTP reachability."""
+    report = {
+        "local_ip": "未知",
+        "remote_ips": "解析失败",
+        "tcp_status": "未知",
+        "gateway_status": "未知",
+    }
+
+    # 1. Local Egress IP (test against multiple public lookup services)
+    ip_services = [
+        "https://api.ipify.org?format=json",
+        "https://httpbin.org/ip",
+        "https://ifconfig.me/all.json",
+    ]
+    for url in ip_services:
+        try:
+            resp = requests.get(url, timeout=3)
+            if resp.status_code == 200:
+                data = resp.json()
+                ip_val = data.get("ip") or data.get("origin") or data.get("ip_addr")
+                if ip_val:
+                    report["local_ip"] = str(ip_val).split(",")[0].strip()
+                    break
+        except Exception:
+            continue
+
+    # 2. Remote IP resolution
+    host = "xsijishe.com"
+    ips: list[str] = []
+    try:
+        resolved = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+        ips = sorted(list(set(item[4][0] for item in resolved)))
+        report["remote_ips"] = ", ".join(ips) if ips else "未返回解析地址"
+    except Exception as exc:
+        report["remote_ips"] = f"解析异常: {exc}"
+
+    # 3. TCP Connect check
+    first_ip = ips[0] if ips else host
+    t0 = time.time()
+    try:
+        with socket.create_connection((first_ip, 443), timeout=timeout):
+            ms = int((time.time() - t0) * 1000)
+            report["tcp_status"] = f"正常 (握手延迟: {ms}ms)"
+    except Exception as exc:
+        report["tcp_status"] = f"连接失败 ({exc})"
+
+    # 4. Probe HTTP Gateway
+    try:
+        probe_resp = requests.get(
+            SIGN_PAGE_URL,
+            headers=DEFAULT_HEADERS,
+            timeout=timeout,
+        )
+        cf_ray = probe_resp.headers.get("cf-ray", "")
+        server = probe_resp.headers.get("server", "")
+        if probe_resp.status_code == 200:
+            report["gateway_status"] = f"HTTP 200 正常 (Server: {server or '未知'})"
+        elif probe_resp.status_code == 403:
+            text = probe_resp.text
+            if "Just a moment" in text or "challenges.cloudflare.com" in text or "cf-mitigated" in probe_resp.headers:
+                report["gateway_status"] = f"HTTP 403 [Cloudflare 5秒盾拦截] (CF-Ray: {cf_ray or '无'})"
+            else:
+                report["gateway_status"] = f"HTTP 403 拒绝访问 (CF-Ray: {cf_ray or '无'})"
+        else:
+            report["gateway_status"] = f"HTTP {probe_resp.status_code} (CF-Ray: {cf_ray or '无'})"
+    except Exception as exc:
+        report["gateway_status"] = f"请求探测异常: {exc}"
+
+    return report
 
 
 class ConfigError(ValueError):
@@ -79,10 +162,15 @@ def parse_account(entry: str, index: int) -> dict[str, str]:
     user_match = re.search(r'(?:^|;)\s*user\s*=\s*([^;]+)', entry, flags=re.IGNORECASE)
     if user_match:
         account["user"] = user_match.group(1).strip()
-        # Remove user=... part
         cookie_part = re.sub(r'(?:^|;)\s*user\s*=[^;]+', '', entry, flags=re.IGNORECASE).strip(" ;")
     else:
         cookie_part = entry
+
+    # Extract proxy if specified
+    proxy_match = re.search(r'(?:^|;)\s*proxy\s*=\s*([^;]+)', cookie_part, flags=re.IGNORECASE)
+    if proxy_match:
+        account["proxy"] = proxy_match.group(1).strip()
+        cookie_part = re.sub(r'(?:^|;)\s*proxy\s*=[^;]+', '', cookie_part, flags=re.IGNORECASE).strip(" ;")
 
     # If cookie_part starts with cookie=, strip it
     cookie_part = re.sub(r'^\s*cookie\s*=\s*', '', cookie_part, flags=re.IGNORECASE).strip(" ;")
@@ -110,6 +198,14 @@ class Xsijishe:
         self.user = account.get("user", "未知用户")
         self.cookie = account.get("cookie", "")
 
+        # Mount proxy if provided via account or environment
+        proxy = account.get("proxy") or os.getenv("PROXY") or os.getenv("HTTPS_PROXY")
+        if proxy:
+            self.session.proxies.update({
+                "http": proxy,
+                "https": proxy,
+            })
+
     def _headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         headers = dict(DEFAULT_HEADERS)
         headers["Cookie"] = self.cookie
@@ -127,7 +223,20 @@ class Xsijishe:
         except requests.Timeout as exc:
             raise XsijisheAPIError("请求司机社接口超时") from exc
         except requests.RequestException as exc:
-            status = getattr(getattr(exc, "response", None), "status_code", None)
+            resp = getattr(exc, "response", None)
+            status = getattr(resp, "status_code", None)
+            if status == 403 and resp is not None:
+                text = resp.text or ""
+                cf_ray = resp.headers.get("cf-ray", "")
+                if "Just a moment" in text or "challenges.cloudflare.com" in text or "cf-mitigated" in resp.headers:
+                    raise XsijisheAPIError(
+                        f"请求司机社接口失败（HTTP 403 - 触发 Cloudflare 5秒盾/人机质询）\n"
+                        f"   CF-Ray: {cf_ray or '无'}\n"
+                        f"   💡 原因分析：GitHub Actions 云服务器机房 IP（Azure/外网）被目标站 Cloudflare WAF 策略拦截。\n"
+                        f"   🔧 解决建议：\n"
+                        f"      1. 在 GitHub Secrets 中添加 PROXY 变量（配置家庭住宅代理或国内代理）\n"
+                        f"      2. 或确保抓取的 Cookie 中包含通过人机验证后的 cf_clearance 字段"
+                    ) from exc
             detail = f"HTTP {status}" if status else type(exc).__name__
             raise XsijisheAPIError(f"请求司机社接口失败（{detail}）") from exc
 
@@ -310,9 +419,23 @@ class Xsijishe:
 def main(
     cookie_value: str | None = None,
     client_factory: Callable[[dict[str, str]], Xsijishe] | None = None,
+    skip_diagnostics: bool = False,
 ) -> int:
     """Run every configured account and return a process-compatible exit code."""
     print("----------司机社每日签到开始----------")
+
+    if not skip_diagnostics:
+        try:
+            diag = check_network_connectivity()
+            print("🌐 网络环境与连通性诊断:")
+            print(f"📍 本地出网 IP  : {diag['local_ip']}")
+            print(f"🎯 目标站点解析: {diag['remote_ips']}")
+            print(f"⚡ TCP 通信状态 : {diag['tcp_status']}")
+            print(f"🛡️ HTTP 网关响应: {diag['gateway_status']}")
+            print("----------------------------------------\n")
+        except Exception as exc:
+            print(f"⚠️ 网络环境诊断异常: {exc}\n")
+
     if cookie_value is None:
         cookie_value = os.getenv("COOKIE_XSIJISHE")
     client_factory = client_factory or Xsijishe

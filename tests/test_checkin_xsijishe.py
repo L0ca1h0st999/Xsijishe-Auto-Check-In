@@ -171,6 +171,15 @@ class XsijisheWorkflowTests(unittest.TestCase):
         self.assertIn("formhash=f68bd696", session.calls[1][1])
 
 
+    def test_parse_account_with_proxy(self):
+        entry = "user=老司机; cookie=SgL6_2132_auth=123; proxy=http://127.0.0.1:7890;"
+        acc = parse_account(entry, 1)
+        self.assertEqual(acc["user"], "老司机")
+        self.assertEqual(acc["proxy"], "http://127.0.0.1:7890")
+        self.assertIn("SgL6_2132_auth=123", acc["cookie"])
+        self.assertNotIn("proxy=", acc["cookie"])
+
+
 class MainIntegrationTests(unittest.TestCase):
     def test_main_all_success(self):
         class MockClient:
@@ -182,7 +191,7 @@ class MainIntegrationTests(unittest.TestCase):
 
         buf = io.StringIO()
         with redirect_stdout(buf):
-            code = main("user=A; cookie=123 && user=B; cookie=456", client_factory=MockClient)
+            code = main("user=A; cookie=123 && user=B; cookie=456", client_factory=MockClient, skip_diagnostics=True)
         self.assertEqual(code, 0)
         output = buf.getvalue()
         self.assertIn("成功 2，失败 0", output)
@@ -202,7 +211,7 @@ class MainIntegrationTests(unittest.TestCase):
 
         buf = io.StringIO()
         with redirect_stdout(buf):
-            code = main("user=A; cookie=123\nuser=B; cookie=456", client_factory=factory)
+            code = main("user=A; cookie=123\nuser=B; cookie=456", client_factory=factory, skip_diagnostics=True)
         self.assertEqual(code, 1)
         output = buf.getvalue()
         self.assertIn("成功 1，失败 1", output)
@@ -210,3 +219,4 @@ class MainIntegrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

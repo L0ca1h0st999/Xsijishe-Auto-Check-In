@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   sign-in:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: 获取北京时间日期
@@ -66,6 +66,7 @@ jobs:
         if: steps.cache-success.outputs.cache-hit != 'true'
         env:
           COOKIE_XSIJISHE: ${{ secrets.COOKIE_XSIJISHE }}
+          PROXY: ${{ secrets.PROXY }}
         run: python checkIn_Xsijishe.py
 
       - name: 生成今日成功标记
