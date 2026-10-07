@@ -24,6 +24,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
         pass
 
 BASE_URL = "https://xsijishe.com"
+DEFAULT_BASE_URL = "https://xsijishe.com"
 SIGN_PAGE_URL = f"{BASE_URL}/k_misign-sign.html"
 SIGN_API_URL = f"{BASE_URL}/plugin.php?id=k_misign:sign&operation=qiandao"
 
@@ -51,7 +52,17 @@ DEFAULT_HEADERS = {
 
 def check_network_connectivity(timeout: float = 5.0) -> dict[str, str]:
     """Diagnose local egress IP, remote target DNS resolution, and TCP/HTTP reachability."""
+    worker_url = os.getenv("CF_WORKER_URL")
+    if worker_url and worker_url.strip():
+        worker_clean = worker_url.strip().rstrip("/")
+        access_mode = f"Cloudflare Worker 反代 ({worker_clean})"
+        probe_url = f"{worker_clean}/k_misign-sign.html"
+    else:
+        access_mode = f"直连目标站点 ({DEFAULT_BASE_URL})"
+        probe_url = f"{DEFAULT_BASE_URL}/k_misign-sign.html"
+
     report = {
+        "access_mode": access_mode,
         "local_ip": "未知",
         "remote_ips": "解析失败",
         "tcp_status": "未知",
@@ -99,7 +110,7 @@ def check_network_connectivity(timeout: float = 5.0) -> dict[str, str]:
     # 4. Probe HTTP Gateway
     try:
         probe_resp = requests.get(
-            SIGN_PAGE_URL,
+            probe_url,
             headers=DEFAULT_HEADERS,
             timeout=timeout,
         )
@@ -172,6 +183,12 @@ def parse_account(entry: str, index: int) -> dict[str, str]:
         account["proxy"] = proxy_match.group(1).strip()
         cookie_part = re.sub(r'(?:^|;)\s*proxy\s*=[^;]+', '', cookie_part, flags=re.IGNORECASE).strip(" ;")
 
+    # Extract worker if specified
+    worker_match = re.search(r'(?:^|;)\s*worker\s*=\s*([^;]+)', cookie_part, flags=re.IGNORECASE)
+    if worker_match:
+        account["worker"] = worker_match.group(1).strip()
+        cookie_part = re.sub(r'(?:^|;)\s*worker\s*=[^;]+', '', cookie_part, flags=re.IGNORECASE).strip(" ;")
+
     # If cookie_part starts with cookie=, strip it
     cookie_part = re.sub(r'^\s*cookie\s*=\s*', '', cookie_part, flags=re.IGNORECASE).strip(" ;")
 
@@ -198,6 +215,18 @@ class Xsijishe:
         self.user = account.get("user", "未知用户")
         self.cookie = account.get("cookie", "")
 
+        # Dynamic base URL: account worker/base_url -> CF_WORKER_URL -> BASE_URL -> DEFAULT_BASE_URL
+        base = (
+            account.get("worker")
+            or account.get("base_url")
+            or os.getenv("CF_WORKER_URL")
+            or os.getenv("BASE_URL")
+            or DEFAULT_BASE_URL
+        ).strip().rstrip("/")
+        self.base_url = base
+        self.sign_page_url = f"{self.base_url}/k_misign-sign.html"
+        self.sign_api_url = f"{self.base_url}/plugin.php?id=k_misign:sign&operation=qiandao"
+
         # Mount proxy if provided via account or environment
         proxy = account.get("proxy") or os.getenv("PROXY") or os.getenv("HTTPS_PROXY")
         if proxy:
@@ -209,6 +238,8 @@ class Xsijishe:
     def _headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         headers = dict(DEFAULT_HEADERS)
         headers["Cookie"] = self.cookie
+        # Referer should always be the standard target sign page
+        headers["Referer"] = f"{DEFAULT_BASE_URL}/k_misign-sign.html"
         if extra:
             headers.update(extra)
         return headers
@@ -286,7 +317,7 @@ class Xsijishe:
 
     def get_sign_page(self) -> dict:
         """Fetch the sign-in page and parse user status and formhash."""
-        resp = self._request("GET", SIGN_PAGE_URL)
+        resp = self._request("GET", self.sign_page_url)
         html = resp.text
 
         # 1. Check if user is logged in
@@ -340,37 +371,50 @@ class Xsijishe:
             "html": html,
         }
 
+    @staticmethod
+    def clean_sign_response(raw_text: str) -> str:
+        """Clean and extract concise message from sign-in response."""
+        cdata_match = re.search(r'<!\[CDATA\[([\s\S]*?)\]\]>', raw_text)
+        msg = cdata_match.group(1) if cdata_match else raw_text
+        clean = re.sub(r'<[^>]+>', ' ', msg)
+        clean = ' '.join(clean.split())
+
+        # Extract reward details: e.g. "签到成功 获得随机奖励 345车票 和 。 已累计签到 130 天。"
+        reward_match = re.search(r'签到成功\s*获得(?:随机)?奖励\s*(\d+[^和。\s,，]*)', clean)
+        if reward_match:
+            reward_detail = reward_match.group(1).strip()
+            total_match = re.search(r'已累计签到\s*(\d+)\s*天', clean)
+            total_info = f"（已累计签到 {total_match.group(1)} 天）" if total_match else ""
+            return f"签到成功，获得奖励：{reward_detail} {total_info}".strip()
+
+        # Extract congratulations sentence
+        congrats_match = re.search(r'(恭喜[^\n\r<>{}]*?签到成功[^\n\r<>{}]*)', clean)
+        if congrats_match:
+            return congrats_match.group(1).strip()
+
+        if "今日已签" in clean or "已经签到" in clean:
+            return "今日已完成签到"
+        if "签到成功" in clean:
+            return "签到成功"
+
+        # If it's a short clean sentence (< 60 chars) without JS scripts
+        if len(clean) < 60 and "var " not in clean and "function" not in clean:
+            return clean
+
+        return "签到请求已提交"
+
     def sign_in(self, formhash: str) -> str:
         """Perform sign-in request using formhash."""
         # Discuz! k_misign plugin AJAX sign-in endpoint
         ajax_headers = {
             "X-Requested-With": "XMLHttpRequest",
-            "Referer": SIGN_PAGE_URL,
+            "Referer": f"{DEFAULT_BASE_URL}/k_misign-sign.html",
         }
 
         # Try GET request first (the standard k_misign trigger)
-        sign_url = f"{SIGN_API_URL}&format=button&formhash={formhash}"
+        sign_url = f"{self.sign_api_url}&format=button&formhash={formhash}"
         resp = self._request("GET", sign_url, headers=ajax_headers)
-        content = resp.text
-
-        # Extract message from XML/CDAT or HTML response
-        cdata_match = re.search(r'<!\[CDATA\[([\s\S]*?)\]\]>', content)
-        msg = cdata_match.group(1) if cdata_match else content
-
-        # Clean tags
-        clean_msg = re.sub(r'<[^>]+>', ' ', msg).strip()
-        clean_msg = ' '.join(clean_msg.split())
-
-        if "今日已签" in clean_msg or "已经签到" in clean_msg:
-            return "今日已完成签到"
-        if "签到成功" in clean_msg or "恭喜" in clean_msg:
-            return clean_msg or "签到成功"
-
-        # If Discuz! returned a general message
-        if clean_msg:
-            return clean_msg
-
-        return "签到请求已提交"
+        return self.clean_sign_response(resp.text)
 
     def do_sign(self, wait_after_sign: float | None = None) -> str:
         """Orchestrate the sign-in workflow for this account."""
@@ -428,6 +472,7 @@ def main(
         try:
             diag = check_network_connectivity()
             print("🌐 网络环境与连通性诊断:")
+            print(f"🔗 访问模式     : {diag['access_mode']}")
             print(f"📍 本地出网 IP  : {diag['local_ip']}")
             print(f"🎯 目标站点解析: {diag['remote_ips']}")
             print(f"⚡ TCP 通信状态 : {diag['tcp_status']}")

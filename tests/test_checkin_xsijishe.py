@@ -179,6 +179,29 @@ class XsijisheWorkflowTests(unittest.TestCase):
         self.assertIn("SgL6_2132_auth=123", acc["cookie"])
         self.assertNotIn("proxy=", acc["cookie"])
 
+    def test_parse_account_with_worker(self):
+        entry = "user=老司机; cookie=SgL6_2132_auth=123; worker=https://xsijishe.workers.dev/;"
+        acc = parse_account(entry, 1)
+        self.assertEqual(acc["user"], "老司机")
+        self.assertEqual(acc["worker"], "https://xsijishe.workers.dev/")
+        self.assertIn("SgL6_2132_auth=123", acc["cookie"])
+        self.assertNotIn("worker=", acc["cookie"])
+
+    def test_clean_sign_response_with_html_noise(self):
+        noisy_html = (
+            "<html><body><script>var x=1;</script><div>"
+            "已签到 连续125天 1202人 1197 签到成功 获得随机奖励 345车票 和 。 已累计签到 130 天。"
+            "</div><script>jQuery(function(){});</script></body></html>"
+        )
+        msg = Xsijishe.clean_sign_response(noisy_html)
+        self.assertEqual(msg, "签到成功，获得奖励：345车票 （已累计签到 130 天）")
+
+    def test_worker_base_url_customization(self):
+        client = Xsijishe({"user": "测试", "cookie": "a=1", "worker": "https://custom.workers.dev/"})
+        self.assertEqual(client.base_url, "https://custom.workers.dev")
+        self.assertEqual(client.sign_page_url, "https://custom.workers.dev/k_misign-sign.html")
+        self.assertEqual(client.sign_api_url, "https://custom.workers.dev/plugin.php?id=k_misign:sign&operation=qiandao")
+
 
 class MainIntegrationTests(unittest.TestCase):
     def test_main_all_success(self):
