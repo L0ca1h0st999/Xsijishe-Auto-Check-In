@@ -1,2 +1,4 @@
 -r requirements.txt
 pytest>=7.4.0
+pyyaml>=6.0
+

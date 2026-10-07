@@ -1,0 +1,82 @@
+name: 司机社每日签到
+
+on:
+  schedule:
+    - cron: "30 0 * * *" # 北京时间 08:30
+    - cron: "30 4 * * *" # 北京时间 12:30，失败重试兜底
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xsijishe-signin-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  sign-in:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 获取北京时间日期
+        id: date
+        shell: bash
+        run: echo "today=$(TZ='Asia/Shanghai' date +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
+
+      - name: 恢复今日成功标记
+        id: cache-success
+        uses: actions/cache/restore@v6
+        with:
+          path: .cache/xsijishe-signin
+          key: xsijishe-signed-${{ steps.date.outputs.today }}
+
+      - name: 今日已完成签到
+        if: steps.cache-success.outputs.cache-hit == 'true'
+        run: echo "今日已全部签到成功，跳过重复执行。"
+
+      - name: 检出代码
+        if: steps.cache-success.outputs.cache-hit != 'true'
+        uses: actions/checkout@v7
+
+      - name: 随机延迟
+        if: steps.cache-success.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            max_delay=10
+          else
+            max_delay=60
+          fi
+          delay=$((RANDOM % (max_delay + 1)))
+          echo "随机延迟 ${delay} 秒后开始执行。"
+          sleep "$delay"
+
+      - name: 设置 Python 环境
+        if: steps.cache-success.outputs.cache-hit != 'true'
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装依赖
+        if: steps.cache-success.outputs.cache-hit != 'true'
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: 执行签到脚本
+        if: steps.cache-success.outputs.cache-hit != 'true'
+        env:
+          COOKIE_XSIJISHE: ${{ secrets.COOKIE_XSIJISHE }}
+        run: python checkIn_Xsijishe.py
+
+      - name: 生成今日成功标记
+        if: success() && steps.cache-success.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .cache/xsijishe-signin
+          echo "${{ steps.date.outputs.today }}" > .cache/xsijishe-signin/success
+
+      - name: 保存今日成功标记
+        if: success() && steps.cache-success.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: .cache/xsijishe-signin
+          key: xsijishe-signed-${{ steps.date.outputs.today }}

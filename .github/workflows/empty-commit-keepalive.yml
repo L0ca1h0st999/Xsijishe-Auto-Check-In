@@ -1,0 +1,35 @@
+name: 每月分支保活
+
+on:
+  schedule:
+    - cron: "0 9 1 * *" # 每月 1 日 UTC 09:00（北京时间 17:00）
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: xsijishe-heartbeat-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  BRANCH_NAME: heartbeat
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 创建每月保活提交
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          git init .
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git checkout --orphan "${BRANCH_NAME}"
+          git commit --allow-empty -m "chore(heartbeat): monthly keepalive $(date -u +%Y-%m-%d)"
+          git branch -M "${BRANCH_NAME}"
+          git push --force origin "${BRANCH_NAME}"
