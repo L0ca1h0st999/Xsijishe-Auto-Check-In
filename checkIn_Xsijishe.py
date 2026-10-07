@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
 from typing import Callable
 from urllib.parse import unquote
 
@@ -130,18 +131,60 @@ class Xsijishe:
             detail = f"HTTP {status}" if status else type(exc).__name__
             raise XsijisheAPIError(f"请求司机社接口失败（{detail}）") from exc
 
+    @staticmethod
+    def _parse_stats(html: str) -> dict[str, str]:
+        """Extract check-in statistics from page HTML.
+
+        Target attributes:
+        - 连续签到 (id="lxdays")
+        - 签到等级 (id="lxlevel")
+        - 积分奖励 (id="lxreward")
+        - 总天数 (id="lxtdays")
+        """
+        stats: dict[str, str] = {
+            "lxdays": "",
+            "lxlevel": "",
+            "lxreward": "",
+            "lxtdays": "",
+        }
+        for key in ("lxdays", "lxlevel", "lxreward", "lxtdays"):
+            m = re.search(rf'id=["\']{key}["\'][^>]*value=["\']([^"\']*)["\']', html)
+            if not m:
+                m = re.search(rf'value=["\']([^"\']*)["\'][^>]*id=["\']{key}["\']', html)
+            if m and m.group(1).strip():
+                stats[key] = m.group(1).strip()
+
+        # Fallback to <h4> headings if input values were not matched
+        heading_map = [
+            ("lxdays", "连续签到"),
+            ("lxlevel", "签到等级"),
+            ("lxreward", "积分奖励"),
+            ("lxtdays", "总天数"),
+        ]
+        for key, heading in heading_map:
+            if not stats[key]:
+                m = re.search(
+                    rf'<li[^>]*>[\s\S]*?<h4>\s*{heading}\s*</h4>([\s\S]*?)</li>',
+                    html,
+                )
+                if m:
+                    li_content = m.group(1)
+                    val_m = re.search(r'value=["\']([^"\']+)["\']', li_content) or re.search(r'>(\d+)<', li_content)
+                    if val_m:
+                        stats[key] = val_m.group(1).strip()
+
+        return stats
+
     def get_sign_page(self) -> dict:
         """Fetch the sign-in page and parse user status and formhash."""
         resp = self._request("GET", SIGN_PAGE_URL)
         html = resp.text
 
         # 1. Check if user is logged in
-        # Non-logged in users typically have discuz_uid = '0' or a login link for JD_sign
         is_guest = False
         if "discuz_uid = '0'" in html or 'discuz_uid = "0"' in html:
             is_guest = True
         elif 'member.php?mod=logging&amp;action=login' in html and 'JD_sign' in html:
-            # Look closer at whether JD_sign specifically links to login
             jd_sign_match = re.search(r'id=["\']JD_sign["\'][^>]*href=["\']([^"\']+)["\']', html)
             if jd_sign_match and "login" in jd_sign_match.group(1):
                 is_guest = True
@@ -168,9 +211,9 @@ class Xsijishe:
         if name_match and name_match.group(1).strip():
             username = f"{self.user} ({name_match.group(1).strip()})"
 
-        # 4. Extract consecutive days and check sign-in status
-        days_match = re.search(r'id=["\']lxdays["\']\s+value=["\'](\d+)["\']', html)
-        consecutive_days = int(days_match.group(1)) if days_match else 0
+        # 4. Extract check-in statistics
+        stats = self._parse_stats(html)
+        consecutive_days = int(stats["lxdays"]) if stats["lxdays"].isdigit() else 0
 
         # Check if already signed in today
         already_signed = False
@@ -184,6 +227,7 @@ class Xsijishe:
             "username": username,
             "consecutive_days": consecutive_days,
             "already_signed": already_signed,
+            "stats": stats,
             "html": html,
         }
 
@@ -219,21 +263,46 @@ class Xsijishe:
 
         return "签到请求已提交"
 
-    def do_sign(self) -> str:
+    def do_sign(self, wait_after_sign: float | None = None) -> str:
         """Orchestrate the sign-in workflow for this account."""
+        if wait_after_sign is None:
+            wait_env = os.getenv("SIGN_WAIT_SECONDS")
+            wait_after_sign = float(wait_env) if wait_env else 3.0
+
         info = self.get_sign_page()
         username = info["username"]
-        consecutive = info["consecutive_days"]
-        lines = [
-            f"👤 用户：{username}",
-            f"📅 连续签到天数：{consecutive} 天",
-        ]
 
         if info["already_signed"]:
-            lines.append("✅ 今日已签到，无需重复打卡")
+            status_line = "✅ 今日已签到，无需重复打卡"
+            stats = info["stats"]
         else:
             reward_msg = self.sign_in(info["formhash"])
-            lines.append(f"🎉 签到结果：{reward_msg}")
+            status_line = f"🎉 签到结果：{reward_msg}"
+            # 签到完成后等待片刻，重新获取网页最新统计属性
+            if wait_after_sign > 0:
+                time.sleep(wait_after_sign)
+            try:
+                updated_info = self.get_sign_page()
+                stats = updated_info["stats"]
+            except Exception:
+                stats = info["stats"]
+
+        lxdays = stats.get("lxdays") or str(info.get("consecutive_days") or 0)
+        lxlevel = stats.get("lxlevel") or "1"
+        lxreward = stats.get("lxreward") or "0"
+        lxtdays = stats.get("lxtdays") or lxdays
+
+        level_str = f"Lv.{lxlevel}" if lxlevel.isdigit() else lxlevel
+        reward_str = f"+{lxreward}" if lxreward.isdigit() and not lxreward.startswith("+") else lxreward
+
+        lines = [
+            f"👤 用户：{username}",
+            f"📊 连续签到：{lxdays} 天",
+            f"🎖️ 签到等级：{level_str}",
+            f"🎁 积分奖励：{reward_str}",
+            f"📅 总天数：{lxtdays} 天",
+            status_line,
+        ]
 
         return "\n".join(lines)
 

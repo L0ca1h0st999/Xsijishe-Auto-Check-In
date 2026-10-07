@@ -109,7 +109,10 @@ class XsijisheWorkflowTests(unittest.TestCase):
         <html>
         <script>var discuz_uid = '12345';</script>
         <input type="hidden" name="formhash" value="f68bd696" />
-        <input type="hidden" id="lxdays" value="10" />
+        <input type="hidden" id="lxdays" value="124" />
+        <input type="hidden" id="lxlevel" value="5" />
+        <input type="hidden" id="lxreward" value="10" />
+        <input type="hidden" id="lxtdays" value="250" />
         <a id="JD_sign" class="btn J_chkitot J_haveread">今日已签到</a>
         <a class="author">老司机007</a>
         </html>
@@ -117,8 +120,11 @@ class XsijisheWorkflowTests(unittest.TestCase):
         session = FakeSession([FakeResponse(html)])
         client = Xsijishe({"user": "账号1", "cookie": "dummy=1"}, session=session)
         result = client.do_sign()
+        self.assertIn("连续签到：124 天", result)
+        self.assertIn("签到等级：Lv.5", result)
+        self.assertIn("积分奖励：+10", result)
+        self.assertIn("总天数：250 天", result)
         self.assertIn("今日已签到，无需重复打卡", result)
-        self.assertIn("连续签到天数：10 天", result)
 
     def test_not_signed_yet_signs_successfully(self):
         page_html = """
@@ -126,6 +132,9 @@ class XsijisheWorkflowTests(unittest.TestCase):
         <script>var discuz_uid = '12345';</script>
         <input type="hidden" name="formhash" value="f68bd696" />
         <input type="hidden" id="lxdays" value="5" />
+        <input type="hidden" id="lxlevel" value="2" />
+        <input type="hidden" id="lxreward" value="1" />
+        <input type="hidden" id="lxtdays" value="15" />
         <a id="JD_sign" class="btn J_chkitot">点击签到</a>
         <a class="author">老司机007</a>
         </html>
@@ -133,14 +142,31 @@ class XsijisheWorkflowTests(unittest.TestCase):
         sign_resp_xml = """<?xml version="1.0" encoding="utf-8"?>
         <root><![CDATA[恭喜您签到成功！获得金币 +2]]></root>
         """
+        updated_page_html = """
+        <html>
+        <script>var discuz_uid = '12345';</script>
+        <input type="hidden" name="formhash" value="f68bd696" />
+        <input type="hidden" id="lxdays" value="6" />
+        <input type="hidden" id="lxlevel" value="2" />
+        <input type="hidden" id="lxreward" value="2" />
+        <input type="hidden" id="lxtdays" value="16" />
+        <a id="JD_sign" class="btn J_chkitot J_haveread">今日已签到</a>
+        <a class="author">老司机007</a>
+        </html>
+        """
         session = FakeSession([
             FakeResponse(page_html),
             FakeResponse(sign_resp_xml),
+            FakeResponse(updated_page_html),
         ])
         client = Xsijishe({"user": "账号1", "cookie": "dummy=1"}, session=session)
-        result = client.do_sign()
+        result = client.do_sign(wait_after_sign=0)
+        self.assertIn("连续签到：6 天", result)
+        self.assertIn("签到等级：Lv.2", result)
+        self.assertIn("积分奖励：+2", result)
+        self.assertIn("总天数：16 天", result)
         self.assertIn("签到结果：恭喜您签到成功！获得金币 +2", result)
-        self.assertEqual(len(session.calls), 2)
+        self.assertEqual(len(session.calls), 3)
         # Check that formhash was passed in the sign API call
         self.assertIn("formhash=f68bd696", session.calls[1][1])
 

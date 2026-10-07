@@ -27,10 +27,10 @@
 
 ### 2. 获取登录 Cookie
 
-在小司机社论坛（`https://xsijishe.com`）完成登录后获取 Cookie：
+在司机社论坛（`https://xsijishe.com`）完成登录后获取 Cookie：
 
 #### 电脑端（推荐）
-1. 在浏览器（Chrome / Edge 等）打开并登录 [小司机社](https://xsijishe.com/)。
+1. 在浏览器（Chrome / Edge 等）打开并登录 [司机社](https://xsijishe.com/)。
 2. 按 `F12` 打开开发者工具，切换到 **Network（网络）** 标签页。
 3. 刷新页面或访问 [签到页面](https://xsijishe.com/k_misign-sign.html)。
 4. 在网络请求列表中点击任意 `xsijishe.com` 的请求（如 `k_misign-sign.html` 或页面主请求）。
