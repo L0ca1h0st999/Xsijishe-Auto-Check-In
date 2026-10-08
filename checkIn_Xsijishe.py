@@ -12,7 +12,7 @@ import socket
 import sys
 import time
 from typing import Callable
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
 import requests
 
@@ -50,13 +50,52 @@ DEFAULT_HEADERS = {
 }
 
 
+def normalize_base_url(url: str | None) -> str:
+    """Normalize base URL to scheme://netloc without trailing slash or path."""
+    if not url or not url.strip():
+        return DEFAULT_BASE_URL
+    clean = url.strip()
+    if not (clean.startswith("http://") or clean.startswith("https://")):
+        clean = f"https://{clean}"
+    parsed = urlparse(clean)
+    if not parsed.netloc:
+        return DEFAULT_BASE_URL
+    return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+
+
+def get_configured_proxy_url() -> str | None:
+    """Retrieve configured reverse proxy URL from environment variables."""
+    raw = (
+        os.getenv("VERCEL_PROXY_URL")
+        or os.getenv("PROXY_URL")
+        or os.getenv("CF_WORKER_URL")
+        or os.getenv("BASE_URL")
+    )
+    if raw and raw.strip():
+        base = normalize_base_url(raw)
+        if base != DEFAULT_BASE_URL:
+            return base
+    return None
+
+
+def get_access_mode_desc(base_url: str) -> str:
+    """Return a descriptive label for the current access mode."""
+    if not base_url or base_url == DEFAULT_BASE_URL:
+        return f"直连目标站点 ({DEFAULT_BASE_URL})"
+    lower = base_url.lower()
+    if "vercel.app" in lower:
+        return f"Vercel 反向代理 ({base_url})"
+    if "workers.dev" in lower:
+        return f"Cloudflare Worker 反代 ({base_url})"
+    return f"反向代理 ({base_url})"
+
+
 def check_network_connectivity(timeout: float = 5.0) -> dict[str, str]:
     """Diagnose local egress IP, remote target DNS resolution, and TCP/HTTP reachability."""
-    worker_url = os.getenv("CF_WORKER_URL")
-    if worker_url and worker_url.strip():
-        worker_clean = worker_url.strip().rstrip("/")
-        access_mode = f"Cloudflare Worker 反代 ({worker_clean})"
-        probe_url = f"{worker_clean}/k_misign-sign.html"
+    configured_base = get_configured_proxy_url()
+    if configured_base:
+        access_mode = get_access_mode_desc(configured_base)
+        probe_url = f"{configured_base}/k_misign-sign.html"
     else:
         access_mode = f"直连目标站点 ({DEFAULT_BASE_URL})"
         probe_url = f"{DEFAULT_BASE_URL}/k_misign-sign.html"
@@ -183,11 +222,12 @@ def parse_account(entry: str, index: int) -> dict[str, str]:
         account["proxy"] = proxy_match.group(1).strip()
         cookie_part = re.sub(r'(?:^|;)\s*proxy\s*=[^;]+', '', cookie_part, flags=re.IGNORECASE).strip(" ;")
 
-    # Extract worker if specified
-    worker_match = re.search(r'(?:^|;)\s*worker\s*=\s*([^;]+)', cookie_part, flags=re.IGNORECASE)
-    if worker_match:
-        account["worker"] = worker_match.group(1).strip()
-        cookie_part = re.sub(r'(?:^|;)\s*worker\s*=[^;]+', '', cookie_part, flags=re.IGNORECASE).strip(" ;")
+    # Extract reverse proxy / base url if specified
+    for kw in ("vercel_url", "proxy_url", "worker", "base_url"):
+        kw_match = re.search(rf'(?:^|;)\s*{kw}\s*=\s*([^;]+)', cookie_part, flags=re.IGNORECASE)
+        if kw_match:
+            account[kw] = kw_match.group(1).strip()
+            cookie_part = re.sub(rf'(?:^|;)\s*{kw}\s*=[^;]+', '', cookie_part, flags=re.IGNORECASE).strip(" ;")
 
     # If cookie_part starts with cookie=, strip it
     cookie_part = re.sub(r'^\s*cookie\s*=\s*', '', cookie_part, flags=re.IGNORECASE).strip(" ;")
@@ -215,15 +255,19 @@ class Xsijishe:
         self.user = account.get("user", "未知用户")
         self.cookie = account.get("cookie", "")
 
-        # Dynamic base URL: account worker/base_url -> CF_WORKER_URL -> BASE_URL -> DEFAULT_BASE_URL
-        base = (
-            account.get("worker")
+        # Dynamic base URL resolution
+        raw_base = (
+            account.get("vercel_url")
+            or account.get("proxy_url")
+            or account.get("worker")
             or account.get("base_url")
+            or os.getenv("VERCEL_PROXY_URL")
+            or os.getenv("PROXY_URL")
             or os.getenv("CF_WORKER_URL")
             or os.getenv("BASE_URL")
             or DEFAULT_BASE_URL
-        ).strip().rstrip("/")
-        self.base_url = base
+        )
+        self.base_url = normalize_base_url(raw_base)
         self.sign_page_url = f"{self.base_url}/k_misign-sign.html"
         self.sign_api_url = f"{self.base_url}/plugin.php?id=k_misign:sign&operation=qiandao"
 
@@ -263,10 +307,11 @@ class Xsijishe:
                     raise XsijisheAPIError(
                         f"请求司机社接口失败（HTTP 403 - 触发 Cloudflare 5秒盾/人机质询）\n"
                         f"   CF-Ray: {cf_ray or '无'}\n"
-                        f"   💡 原因分析：GitHub Actions 云服务器机房 IP（Azure/外网）被目标站 Cloudflare WAF 策略拦截。\n"
+                        f"   💡 原因分析：当前出网 IP（GitHub Actions/机房网络）被目标站 Cloudflare WAF 策略拦截。\n"
                         f"   🔧 解决建议：\n"
-                        f"      1. 在 GitHub Secrets 中添加 PROXY 变量（配置家庭住宅代理或国内代理）\n"
-                        f"      2. 或确保抓取的 Cookie 中包含通过人机验证后的 cf_clearance 字段"
+                        f"      1. 推荐在 GitHub Secrets 中配置 VERCEL_PROXY_URL 反向代理（免费且稳定）\n"
+                        f"      2. 或在 GitHub Secrets 中配置 PROXY 代理变量（住宅代理/第三方代理）\n"
+                        f"      3. 或确保抓取的 Cookie 中包含通过人机验证后的 cf_clearance 字段"
                     ) from exc
             detail = f"HTTP {status}" if status else type(exc).__name__
             raise XsijisheAPIError(f"请求司机社接口失败（{detail}）") from exc

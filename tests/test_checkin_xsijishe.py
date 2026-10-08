@@ -13,7 +13,9 @@ from checkIn_Xsijishe import (
     ConfigError,
     Xsijishe,
     XsijisheAPIError,
+    get_access_mode_desc,
     main,
+    normalize_base_url,
     parse_account,
     split_account_entries,
 )
@@ -201,6 +203,46 @@ class XsijisheWorkflowTests(unittest.TestCase):
         self.assertEqual(client.base_url, "https://custom.workers.dev")
         self.assertEqual(client.sign_page_url, "https://custom.workers.dev/k_misign-sign.html")
         self.assertEqual(client.sign_api_url, "https://custom.workers.dev/plugin.php?id=k_misign:sign&operation=qiandao")
+
+    def test_normalize_base_url_various_formats(self):
+        self.assertEqual(
+            normalize_base_url("https://xsijishe-proxy-vercel.vercel.app/k_misign-sign.html"),
+            "https://xsijishe-proxy-vercel.vercel.app",
+        )
+        self.assertEqual(
+            normalize_base_url("https://xsijishe-proxy-vercel.vercel.app/"),
+            "https://xsijishe-proxy-vercel.vercel.app",
+        )
+        self.assertEqual(
+            normalize_base_url("xsijishe-proxy-vercel.vercel.app"),
+            "https://xsijishe-proxy-vercel.vercel.app",
+        )
+        self.assertEqual(
+            normalize_base_url(""),
+            "https://xsijishe.com",
+        )
+        self.assertEqual(
+            normalize_base_url(None),
+            "https://xsijishe.com",
+        )
+
+    def test_get_access_mode_desc(self):
+        self.assertIn("Vercel 反向代理", get_access_mode_desc("https://demo.vercel.app"))
+        self.assertIn("Cloudflare Worker 反代", get_access_mode_desc("https://demo.workers.dev"))
+        self.assertIn("反向代理", get_access_mode_desc("https://proxy.custom.com"))
+        self.assertIn("直连目标站点", get_access_mode_desc("https://xsijishe.com"))
+
+    def test_parse_account_with_vercel_url(self):
+        entry = "user=老司机; cookie=SgL6_2132_auth=123; vercel_url=https://xsijishe-proxy-vercel.vercel.app/k_misign-sign.html;"
+        acc = parse_account(entry, 1)
+        self.assertEqual(acc["user"], "老司机")
+        self.assertEqual(acc["vercel_url"], "https://xsijishe-proxy-vercel.vercel.app/k_misign-sign.html")
+        self.assertIn("SgL6_2132_auth=123", acc["cookie"])
+        self.assertNotIn("vercel_url=", acc["cookie"])
+
+        client = Xsijishe(acc)
+        self.assertEqual(client.base_url, "https://xsijishe-proxy-vercel.vercel.app")
+        self.assertEqual(client.sign_page_url, "https://xsijishe-proxy-vercel.vercel.app/k_misign-sign.html")
 
 
 class MainIntegrationTests(unittest.TestCase):

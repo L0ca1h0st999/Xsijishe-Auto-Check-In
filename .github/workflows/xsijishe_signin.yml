@@ -66,6 +66,8 @@ jobs:
         if: steps.cache-success.outputs.cache-hit != 'true'
         env:
           COOKIE_XSIJISHE: ${{ secrets.COOKIE_XSIJISHE }}
+          VERCEL_PROXY_URL: ${{ secrets.VERCEL_PROXY_URL }}
+          PROXY_URL: ${{ secrets.PROXY_URL }}
           CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
           PROXY: ${{ secrets.PROXY }}
         run: python checkIn_Xsijishe.py
