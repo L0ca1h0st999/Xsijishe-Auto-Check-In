@@ -35,6 +35,7 @@ class FakeSession:
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls = []
+        self.proxies = {}
 
     def request(self, method, url, **kwargs):
         self.calls.append((method, url, kwargs))
@@ -240,9 +241,30 @@ class XsijisheWorkflowTests(unittest.TestCase):
         self.assertIn("SgL6_2132_auth=123", acc["cookie"])
         self.assertNotIn("vercel_url=", acc["cookie"])
 
+    def test_parse_account_with_user_agent(self):
+        entry = "user=老司机; cookie=SgL6_2132_auth=123; ua=Mozilla/5.0 (CustomBrowser);"
+        acc = parse_account(entry, 1)
+        self.assertEqual(acc["user"], "老司机")
+        self.assertEqual(acc["user_agent"], "Mozilla/5.0 (CustomBrowser)")
+        self.assertIn("SgL6_2132_auth=123", acc["cookie"])
+        self.assertNotIn("ua=", acc["cookie"])
+
         client = Xsijishe(acc)
-        self.assertEqual(client.base_url, "https://xsijishe-proxy-vercel.vercel.app")
-        self.assertEqual(client.sign_page_url, "https://xsijishe-proxy-vercel.vercel.app/k_misign-sign.html")
+        headers = client._headers()
+        self.assertEqual(headers["User-Agent"], "Mozilla/5.0 (CustomBrowser)")
+
+    def test_proxy_environment_does_not_break_fake_session(self):
+        old_proxy = os.environ.get("HTTPS_PROXY")
+        try:
+            os.environ["HTTPS_PROXY"] = "http://127.0.0.1:9999"
+            session = FakeSession([FakeResponse("<html></html>")])
+            client = Xsijishe({"user": "测试", "cookie": "a=1"}, session=session)
+            self.assertEqual(session.proxies.get("https"), "http://127.0.0.1:9999")
+        finally:
+            if old_proxy is not None:
+                os.environ["HTTPS_PROXY"] = old_proxy
+            else:
+                os.environ.pop("HTTPS_PROXY", None)
 
 
 class MainIntegrationTests(unittest.TestCase):

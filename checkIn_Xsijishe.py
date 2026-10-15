@@ -28,17 +28,19 @@ DEFAULT_BASE_URL = "https://xsijishe.com"
 SIGN_PAGE_URL = f"{BASE_URL}/k_misign-sign.html"
 SIGN_API_URL = f"{BASE_URL}/plugin.php?id=k_misign:sign&operation=qiandao"
 
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/155.0.0.0 Safari/537.36"
+)
+
 DEFAULT_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
+    "User-Agent": os.getenv("USER_AGENT") or DEFAULT_USER_AGENT,
     "Accept": (
         "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
     ),
     "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-    "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "sec-ch-ua": '"Chromium";v="155", "Google Chrome";v="155", "Not-A.Brand";v="99"',
     "sec-ch-ua-mobile": "?0",
     "sec-ch-ua-platform": '"Windows"',
     "sec-fetch-dest": "document",
@@ -158,8 +160,13 @@ def check_network_connectivity(timeout: float = 5.0) -> dict[str, str]:
         if probe_resp.status_code == 200:
             report["gateway_status"] = f"HTTP 200 正常 (Server: {server or '未知'})"
         elif probe_resp.status_code == 403:
-            text = probe_resp.text
-            if "Just a moment" in text or "challenges.cloudflare.com" in text or "cf-mitigated" in probe_resp.headers:
+            if (
+                "Just a moment" in text
+                or "challenges.cloudflare.com" in text
+                or "challenge-platform" in text
+                or "__CF$cv$params" in text
+                or "cf-mitigated" in probe_resp.headers
+            ):
                 report["gateway_status"] = f"HTTP 403 [Cloudflare 5秒盾拦截] (CF-Ray: {cf_ray or '无'})"
             else:
                 report["gateway_status"] = f"HTTP 403 拒绝访问 (CF-Ray: {cf_ray or '无'})"
@@ -229,6 +236,12 @@ def parse_account(entry: str, index: int) -> dict[str, str]:
             account[kw] = kw_match.group(1).strip()
             cookie_part = re.sub(rf'(?:^|;)\s*{kw}\s*=[^;]+', '', cookie_part, flags=re.IGNORECASE).strip(" ;")
 
+    # Extract custom user agent if specified
+    ua_match = re.search(r'(?:^|;)\s*(?:user_agent|ua)\s*=\s*([^;]+)', cookie_part, flags=re.IGNORECASE)
+    if ua_match:
+        account["user_agent"] = ua_match.group(1).strip()
+        cookie_part = re.sub(r'(?:^|;)\s*(?:user_agent|ua)\s*=[^;]+', '', cookie_part, flags=re.IGNORECASE).strip(" ;")
+
     # If cookie_part starts with cookie=, strip it
     cookie_part = re.sub(r'^\s*cookie\s*=\s*', '', cookie_part, flags=re.IGNORECASE).strip(" ;")
 
@@ -273,7 +286,7 @@ class Xsijishe:
 
         # Mount proxy if provided via account or environment
         proxy = account.get("proxy") or os.getenv("PROXY") or os.getenv("HTTPS_PROXY")
-        if proxy:
+        if proxy and hasattr(self.session, "proxies") and isinstance(self.session.proxies, dict):
             self.session.proxies.update({
                 "http": proxy,
                 "https": proxy,
@@ -281,6 +294,9 @@ class Xsijishe:
 
     def _headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         headers = dict(DEFAULT_HEADERS)
+        custom_ua = self.account.get("user_agent") or os.getenv("USER_AGENT")
+        if custom_ua:
+            headers["User-Agent"] = custom_ua
         headers["Cookie"] = self.cookie
         # Referer should always be the standard target sign page
         headers["Referer"] = f"{DEFAULT_BASE_URL}/k_misign-sign.html"
@@ -303,15 +319,15 @@ class Xsijishe:
             if status == 403 and resp is not None:
                 text = resp.text or ""
                 cf_ray = resp.headers.get("cf-ray", "")
-                if "Just a moment" in text or "challenges.cloudflare.com" in text or "cf-mitigated" in resp.headers:
+                if "Just a moment" in text or "challenges.cloudflare.com" in text or "cf-mitigated" in resp.headers or "__CF$cv$params" in text:
                     raise XsijisheAPIError(
                         f"请求司机社接口失败（HTTP 403 - 触发 Cloudflare 5秒盾/人机质询）\n"
                         f"   CF-Ray: {cf_ray or '无'}\n"
-                        f"   💡 原因分析：当前出网 IP（GitHub Actions/机房网络）被目标站 Cloudflare WAF 策略拦截。\n"
+                        f"   💡 原因分析：目标站点 Cloudflare 开启了严格的人机安全验证（5秒盾）。\n"
                         f"   🔧 解决建议：\n"
-                        f"      1. 推荐在 GitHub Secrets 中配置 VERCEL_PROXY_URL 反向代理（免费且稳定）\n"
-                        f"      2. 或在 GitHub Secrets 中配置 PROXY 代理变量（住宅代理/第三方代理）\n"
-                        f"      3. 或确保抓取的 Cookie 中包含通过人机验证后的 cf_clearance 字段"
+                        f"      1. 确保抓取的 Cookie 中包含通过人机验证生成的 cf_clearance 字段\n"
+                        f"      2. 确保请求的 User-Agent 与抓取 Cookie 时使用的浏览器一致（可在环境变量/Secrets 中设置 USER_AGENT）\n"
+                        f"      3. 若在云端（GitHub Actions）运行，建议搭配住宅/国内代理（设置 PROXY）或配置自建 Runner"
                     ) from exc
             detail = f"HTTP {status}" if status else type(exc).__name__
             raise XsijisheAPIError(f"请求司机社接口失败（{detail}）") from exc

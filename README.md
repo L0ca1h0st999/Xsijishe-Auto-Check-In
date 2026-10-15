@@ -55,7 +55,9 @@
 3. 刷新页面或访问 [签到页面](https://xsijishe.com/k_misign-sign.html)。
 4. 在网络请求列表中点击任意 `xsijishe.com` 请求（如 `k_misign-sign.html`）。
 5. 在 **Headers（标头）** -> **Request Headers（请求标头）** 中找到 `Cookie`。
-6. 复制整串 `Cookie` 内容（需包含 `SgL6_2132_saltkey` 与 `SgL6_2132_auth` 字段）。
+6. 复制整串 `Cookie` 内容。
+   - 基础鉴权需包含 `SgL6_2132_saltkey` 与 `SgL6_2132_auth` 字段。
+   - 若论坛当前启用了 Cloudflare 人机质询（5秒盾），必须确保 Cookie 中包含通过验证后生成的 `cf_clearance` 字段。
 
 ### 4. 配置 GitHub Actions Secrets
 
@@ -63,8 +65,9 @@
 
 | Secret 名称 | 是否必需 | 说明 |
 | :--- | :--- | :--- |
-| `COOKIE_XSIJISHE` | **必需** | 用户的论坛登录 Cookie |
+| `COOKIE_XSIJISHE` | **必需** | 用户的论坛登录 Cookie（含 Discuz 鉴权与 `cf_clearance`） |
 | `VERCEL_PROXY_URL` | **推荐** | 第 2 步中部署的 Vercel 域名（如 `https://xxx.vercel.app`） |
+| `USER_AGENT` | 可选 | 抓取 Cookie 时所用浏览器的 User-Agent（默认预设现代 Chrome 155 UA） |
 | `PROXY` | 可选 | 自定义 HTTP/SOCKS5 代理地址（如 `http://1.2.3.4:7890`） |
 
 #### COOKIE_XSIJISHE 配置格式
@@ -131,8 +134,12 @@ pytest -v
 ### 1. 提示“账号 Cookie 已失效或未登录”
 Discuz! 的鉴权 Cookie 在密码修改、账号注销或到期后会失效。请重新在浏览器登录并抓取最新 Cookie 更新至 GitHub Secret。
 
-### 2. 提示“HTTP 403 - 触发 Cloudflare 5秒盾/人机质询”
-GitHub Actions 的云机房 IP 被目标站的 Cloudflare WAF 策略拦截。请按照文档第 2 步配置免费的 `VERCEL_PROXY_URL` 反向代理即可解决。
+### 2. 正常运行几天后忽然提示“HTTP 403 - 触发 Cloudflare 5秒盾/人机质询”
+* **原因**：目标站点临时开启或加固了 Cloudflare 防护策略（Under Attack Mode 或针对性风控）。Cloudflare 通过签发 `cf_clearance` 凭据放行通过人机验证的请求，该凭据有一定有效期，且与通过验证时的**出网 IP** 及**浏览器 User-Agent** 存在强校验关系。
+* **解决办法**：
+  1. 在电脑端浏览器打开论坛，正常通过人机验证加载页面。
+  2. 按照上文步骤重新抓取最新的完整 Cookie（确保包含最新的 `cf_clearance` 字段），更新到 GitHub Secrets 的 `COOKIE_XSIJISHE`。
+  3. 若你使用的浏览器不是主流 Chrome，建议在 GitHub Secrets 中同时配置 `USER_AGENT`（值为你浏览器的完整 UA），确保与 `cf_clearance` 严格匹配。
 
 ### 3. GitHub Actions 没有准点执行
 GitHub Actions 的定时触发任务受全局队列调度影响，通常会有数分钟至数十分钟的排队延迟，属平台正常现象。本项目已配置 12:30 自动兜底重试以保障签到成功率。
