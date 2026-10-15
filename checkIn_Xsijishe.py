@@ -160,6 +160,7 @@ def check_network_connectivity(timeout: float = 5.0) -> dict[str, str]:
         if probe_resp.status_code == 200:
             report["gateway_status"] = f"HTTP 200 正常 (Server: {server or '未知'})"
         elif probe_resp.status_code == 403:
+            text = probe_resp.text or ""
             if (
                 "Just a moment" in text
                 or "challenges.cloudflare.com" in text
@@ -242,6 +243,12 @@ def parse_account(entry: str, index: int) -> dict[str, str]:
         account["user_agent"] = ua_match.group(1).strip()
         cookie_part = re.sub(r'(?:^|;)\s*(?:user_agent|ua)\s*=[^;]+', '', cookie_part, flags=re.IGNORECASE).strip(" ;")
 
+    # Extract sign mode if specified (e.g. mode=browser or mode=http)
+    mode_match = re.search(r'(?:^|;)\s*mode\s*=\s*([^;]+)', cookie_part, flags=re.IGNORECASE)
+    if mode_match:
+        account["mode"] = mode_match.group(1).strip()
+        cookie_part = re.sub(r'(?:^|;)\s*mode\s*=[^;]+', '', cookie_part, flags=re.IGNORECASE).strip(" ;")
+
     # If cookie_part starts with cookie=, strip it
     cookie_part = re.sub(r'^\s*cookie\s*=\s*', '', cookie_part, flags=re.IGNORECASE).strip(" ;")
 
@@ -267,6 +274,14 @@ class Xsijishe:
         self.timeout = timeout
         self.user = account.get("user", "未知用户")
         self.cookie = account.get("cookie", "")
+
+        # Check whether browser mode is requested
+        mode_setting = (account.get("mode") or "").strip().lower()
+        env_use_browser = os.getenv("USE_BROWSER", "").strip().lower() in ("true", "1", "yes", "on")
+        env_sign_mode = os.getenv("SIGN_MODE", "").strip().lower() in ("browser", "playwright")
+        self.use_browser = mode_setting in ("browser", "playwright") or (
+            mode_setting != "http" and (env_use_browser or env_sign_mode)
+        )
 
         # Dynamic base URL resolution
         raw_base = (
@@ -477,8 +492,202 @@ class Xsijishe:
         resp = self._request("GET", sign_url, headers=ajax_headers)
         return self.clean_sign_response(resp.text)
 
+    def do_sign_browser(self, wait_after_sign: float | None = None) -> str:
+        """Execute sign-in using a headless browser to bypass Cloudflare Turnstile / 5s shield."""
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise XsijisheAPIError(
+                "已启用无头浏览器模式，但未检测到 playwright 依赖。\n"
+                "   🔧 解决方式：请执行 pip install playwright && playwright install chromium\n"
+                "   💡 若在 GitHub Actions 中，请确认工作流安装了 playwright 及浏览器内核。"
+            ) from exc
+
+        if wait_after_sign is None:
+            wait_env = os.getenv("SIGN_WAIT_SECONDS")
+            wait_after_sign = float(wait_env) if wait_env else 3.0
+
+        custom_ua = self.account.get("user_agent") or os.getenv("USER_AGENT") or DEFAULT_USER_AGENT
+        proxy = self.account.get("proxy") or os.getenv("PROXY") or os.getenv("HTTPS_PROXY")
+        proxy_settings = {"server": proxy} if proxy else None
+
+        args = [
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-infobars",
+            "--disable-dev-shm-usage",
+        ]
+
+        with sync_playwright() as p:
+            browser = None
+            launch_errors = []
+            for launch_opts in [
+                {"headless": True, "args": args},
+                {"channel": "chrome", "headless": True, "args": args},
+                {"channel": "msedge", "headless": True, "args": args},
+            ]:
+                if proxy_settings:
+                    launch_opts["proxy"] = proxy_settings
+                try:
+                    browser = p.chromium.launch(**launch_opts)
+                    break
+                except Exception as exc:
+                    launch_errors.append(str(exc))
+
+            if not browser:
+                err_detail = launch_errors[-1] if launch_errors else "未知启动异常"
+                raise XsijisheAPIError(
+                    f"无法启动浏览器内核，请确保已安装 Playwright 浏览器组件 (playwright install chromium)。\n"
+                    f"   详细错误: {err_detail}"
+                )
+
+            try:
+                context = browser.new_context(
+                    user_agent=custom_ua,
+                    viewport={"width": 1280, "height": 720},
+                    locale="zh-CN",
+                    timezone_id="Asia/Shanghai",
+                )
+                context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+
+                # Inject cookies
+                cookies_to_add = []
+                for item in self.cookie.split(";"):
+                    if "=" in item:
+                        k, v = item.strip().split("=", 1)
+                        k = k.strip()
+                        v = v.strip()
+                        if k:
+                            cookies_to_add.append({
+                                "name": k,
+                                "value": v,
+                                "url": self.base_url,
+                            })
+                if cookies_to_add:
+                    context.add_cookies(cookies_to_add)
+
+                page = context.new_page()
+                captured_sign_rewards: list[str] = []
+
+                def handle_response(response):
+                    try:
+                        if "k_misign" in response.url and "qiandao" in response.url:
+                            resp_text = response.text()
+                            clean_msg = Xsijishe.clean_sign_response(resp_text)
+                            if clean_msg:
+                                captured_sign_rewards.append(clean_msg)
+                    except Exception:
+                        pass
+
+                page.on("response", handle_response)
+                page.goto(self.sign_page_url, wait_until="load", timeout=60000)
+
+                # Wait for Cloudflare Turnstile challenge completion and target elements
+                try:
+                    page.wait_for_selector(
+                        "#JD_sign, .btnvisted, a.author, strong.vwmy, .nex_member, .qdleft",
+                        timeout=25000,
+                    )
+                except Exception:
+                    pass
+
+                title = page.title()
+                content = page.content()
+
+                if "Just a moment" in title or "Attention Required" in title or "challenge-platform" in content:
+                    time.sleep(5)
+                    title = page.title()
+                    content = page.content()
+                    if "Just a moment" in title or "Attention Required" in title:
+                        raise XsijisheAPIError(f"Cloudflare 人机质询未能自动通过 (页面标题: {title})")
+
+                if "discuz_uid = '0'" in content or 'discuz_uid = "0"' in content:
+                    raise XsijisheAPIError("账号 Cookie 已失效或未登录，请重新获取")
+
+                jd_sign = page.locator("#JD_sign")
+                btn_visted = page.locator(".btnvisted, .btn_haveread, .J_haveread")
+
+                # Extract username
+                username = self.user
+                vwmy = page.locator("strong.vwmy a, a.author")
+                if vwmy.count() > 0:
+                    nick = vwmy.first.inner_text().strip()
+                    if nick:
+                        username = f"{self.user} ({nick})"
+
+                # Check if already signed today
+                already_signed = False
+                if btn_visted.count() > 0 or "今日已签" in content or "btnvisted" in content:
+                    already_signed = True
+                elif jd_sign.count() > 0:
+                    sign_btn = jd_sign.first
+                    sign_text = sign_btn.inner_text()
+                    sign_class = sign_btn.get_attribute("class") or ""
+                    if "今日已签" in sign_text or "haveread" in sign_class or "btnvisted" in sign_class or "signed" in sign_class:
+                        already_signed = True
+                elif page.locator("#lxdays, .qdleft, .qdright").count() > 0:
+                    # In Discuz! k_misign plugin, #JD_sign is completely replaced by .btnvisted once signed
+                    already_signed = True
+
+                if already_signed:
+                    status_line = "✅ 今日已签到，无需重复打卡"
+                else:
+                    if jd_sign.count() == 0:
+                        raise XsijisheAPIError(f"未能在页面找到签到按钮 (页面标题: {title})")
+                    sign_btn = jd_sign.first
+                    sign_btn.click()
+                    if wait_after_sign > 0:
+                        time.sleep(wait_after_sign)
+
+                    if captured_sign_rewards:
+                        status_line = f"🎉 签到结果：{captured_sign_rewards[-1]}"
+                    else:
+                        sign_text = sign_btn.inner_text()
+                        sign_class = sign_btn.get_attribute("class") or ""
+                        if "今日已签" in sign_text or "haveread" in sign_class or "btnvisted" in sign_class or "signed" in sign_class:
+                            status_line = "🎉 签到结果：签到成功"
+                        else:
+                            clean_text = Xsijishe.clean_sign_response(sign_text)
+                            status_line = f"🎉 签到结果：{clean_text or '签到请求已提交'}"
+
+                # Extract check-in statistics
+                stats = {}
+                for stat_id in ("lxdays", "lxlevel", "lxreward", "lxtdays"):
+                    loc = page.locator(f"#{stat_id}")
+                    if loc.count() > 0:
+                        val = loc.first.get_attribute("value")
+                        if val is not None and val.strip():
+                            stats[stat_id] = val.strip()
+
+                if not stats.get("lxdays"):
+                    stats = self._parse_stats(page.content())
+
+                lxdays = stats.get("lxdays") or "0"
+                lxlevel = stats.get("lxlevel") or "1"
+                lxreward = stats.get("lxreward") or "0"
+                lxtdays = stats.get("lxtdays") or lxdays
+
+                level_str = f"Lv.{lxlevel}" if lxlevel.isdigit() else lxlevel
+                reward_str = f"+{lxreward}" if lxreward.isdigit() and not lxreward.startswith("+") else lxreward
+
+                lines = [
+                    f"👤 用户：{username}",
+                    f"📊 连续签到：{lxdays} 天",
+                    f"🎖️ 签到等级：{level_str}",
+                    f"🎁 积分奖励：{reward_str}",
+                    f"📅 总天数：{lxtdays} 天",
+                    status_line,
+                ]
+                return "\n".join(lines)
+            finally:
+                browser.close()
+
     def do_sign(self, wait_after_sign: float | None = None) -> str:
         """Orchestrate the sign-in workflow for this account."""
+        if self.use_browser:
+            return self.do_sign_browser(wait_after_sign=wait_after_sign)
+
         if wait_after_sign is None:
             wait_env = os.getenv("SIGN_WAIT_SECONDS")
             wait_after_sign = float(wait_env) if wait_env else 3.0
@@ -534,6 +743,12 @@ def main(
             diag = check_network_connectivity()
             print("🌐 网络环境与连通性诊断:")
             print(f"🔗 访问模式     : {diag['access_mode']}")
+            is_browser_env = (
+                os.getenv("USE_BROWSER", "").strip().lower() in ("true", "1", "yes", "on")
+                or os.getenv("SIGN_MODE", "").strip().lower() in ("browser", "playwright")
+            )
+            kernel_desc = "无头浏览器过盾模式 (Playwright)" if is_browser_env else "标准 HTTP 请求模式 (轻量)"
+            print(f"⚙️ 签到内核     : {kernel_desc}")
             print(f"📍 本地出网 IP  : {diag['local_ip']}")
             print(f"🎯 目标站点解析: {diag['remote_ips']}")
             print(f"⚡ TCP 通信状态 : {diag['tcp_status']}")

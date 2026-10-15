@@ -1,14 +1,16 @@
 # 司机社自动签到 (Xsijishe Auto Check-In)
 
-基于 Python 与 GitHub Actions 的司机社论坛（Discuz! `k_misign` 插件）自动化打卡签到工具。支持单账号与多账号，内置网络诊断、Vercel 反向代理支持、异常隔离、防风控随机休眠与缓存幂等机制。
+基于 Python 与 GitHub Actions 的司机社论坛（Discuz! `k_misign` 插件）自动化打卡签到工具。支持单账号与多账号，内置双运行内核（轻量 HTTP / 无头浏览器过盾）、网络连通性诊断、Vercel 反向代理支持、异常隔离、防风控随机休眠与缓存幂等机制。
 
 ---
 
 ## 功能特性
 
+- **双运行内核设计**：
+  - **路线一：轻量 HTTP 模式（默认）**：基于 `requests`，搭配 Vercel 免费反向代理或直连，零冗余开销，数秒内完成打卡。
+  - **路线二：无头浏览器过盾模式（可选）**：基于 `Playwright` 自动化内核，自动执行 Cloudflare 5秒盾（Turnstile / JS Challenge）动态质询，彻底解决机房 IP 触发 HTTP 403 拦截问题。
 - **双定时调度与失败兜底**：北京时间每天 08:30 执行签到，12:30 自动重试兜底。
 - **日期级幂等缓存**：当天账号全部签到成功后自动写入 GitHub Actions Cache，同一天内后续定时或重复触发自动跳过，节省 Actions 运行额度。
-- **Vercel 反向代理支持**：针对 GitHub Actions 云机房 IP 触发 Cloudflare 5秒盾（HTTP 403）的问题，原生支持 Vercel 免费反代，实现稳定通信。
 - **网络诊断与健康检查**：内置出网 IP、目标 DNS 解析、TCP 延迟与 HTTP 网关响应诊断，便于排查环境问题。
 - **多账号与独立隔离**：支持换行或 `&&` 分隔多账号配置，各账号独立执行，单账号异常不影响其他账号。
 - **动态令牌自动提取**：自动从签到页面提取动态 `formhash` CSRF 令牌，无需手动抓取与维护。
@@ -25,28 +27,7 @@
 2. 进入 Fork 后的仓库，切换到 **Actions** 页面。
 3. 若提示工作流未启用，点击 **"I understand my workflows, go ahead and enable them"**。
 
-### 2. 部署 Vercel 反向代理（推荐，解决 Actions 403）
-
-由于 GitHub Actions 运行在微软 Azure 机房，目标站点启用的 Cloudflare 防护会对机房 IP 触发人机验证（HTTP 403）。使用 Vercel 免费部署一个轻量反向代理即可彻底解决此问题。
-
-#### 部署步骤（仅需 1 分钟）
-1. 在 GitHub 上新建一个仓库（例如 `xsijishe-proxy`，建议设为 Private）。
-2. 在该仓库根目录下新建文件 `vercel.json`，内容如下：
-   ```json
-   {
-     "rewrites": [
-       {
-         "source": "/:path*",
-         "destination": "https://xsijishe.com/:path*"
-       }
-     ]
-   }
-   ```
-3. 登录 [Vercel 官网 (vercel.com)](https://vercel.com)，点击 **Add New...** -> **Project**。
-4. 导入刚刚创建的 `xsijishe-proxy` 仓库，Framework Preset 保持默认（Other），点击 **Deploy**。
-5. 部署完成后即可获得专属域名，例如 `https://xsijishe-proxy-xxxx.vercel.app`。
-
-### 3. 获取论坛登录 Cookie
+### 2. 获取论坛登录 Cookie
 
 在电脑端浏览器中登录司机社论坛（`https://xsijishe.com`）后获取 Cookie：
 
@@ -57,17 +38,17 @@
 5. 在 **Headers（标头）** -> **Request Headers（请求标头）** 中找到 `Cookie`。
 6. 复制整串 `Cookie` 内容。
    - 基础鉴权需包含 `SgL6_2132_saltkey` 与 `SgL6_2132_auth` 字段。
-   - 若论坛当前启用了 Cloudflare 人机质询（5秒盾），必须确保 Cookie 中包含通过验证后生成的 `cf_clearance` 字段。
 
-### 4. 配置 GitHub Actions Secrets
+### 3. 配置 GitHub Actions Secrets
 
 进入 Fork 仓库，点击 **Settings** -> **Secrets and variables** -> **Actions** -> **New repository secret**：
 
-| Secret 名称 | 是否必需 | 说明 |
+| Secret / Variable 名称 | 是否必需 | 说明 |
 | :--- | :--- | :--- |
-| `COOKIE_XSIJISHE` | **必需** | 用户的论坛登录 Cookie（含 Discuz 鉴权与 `cf_clearance`） |
-| `VERCEL_PROXY_URL` | **推荐** | 第 2 步中部署的 Vercel 域名（如 `https://xxx.vercel.app`） |
-| `USER_AGENT` | 可选 | 抓取 Cookie 时所用浏览器的 User-Agent（默认预设现代 Chrome 155 UA） |
+| `COOKIE_XSIJISHE` | **必需** | 用户的论坛登录 Cookie |
+| `USE_BROWSER` | 可选 | 设为 `true` 开启无头浏览器过盾模式（Playwright），默认 `false` |
+| `VERCEL_PROXY_URL` | 可选 | Vercel 反代域名（如 `https://xxx.vercel.app`），HTTP 模式推荐 |
+| `USER_AGENT` | 可选 | 自定义浏览器 User-Agent（默认预设现代 Chrome 155 UA） |
 | `PROXY` | 可选 | 自定义 HTTP/SOCKS5 代理地址（如 `http://1.2.3.4:7890`） |
 
 #### COOKIE_XSIJISHE 配置格式
@@ -82,36 +63,66 @@
   user=老司机张三; cookie=SgL6_2132_saltkey=xxxxxx; SgL6_2132_auth=yyyyyy; ...
   ```
 
+- **单账号（指定使用浏览器模式）**：
+  ```text
+  user=老司机张三; mode=browser; cookie=SgL6_2132_saltkey=xxxxxx; ...
+  ```
+
 - **多账号（换行或 `&&` 分隔）**：
   ```text
   user=张三; cookie=SgL6_...;
   user=李四; cookie=SgL6_...;
   ```
 
-### 5. 手动运行测试
+---
 
-1. 前往仓库的 **Actions** -> **司机社每日签到**。
-2. 点击 **Run workflow** -> 选择 `main` 分支启动。
-3. 查看执行日志，确认网络诊断、访问模式及签到结果（连续签到天数、等级、积分奖励等）。
+## 运行模式说明
+
+### 路线一：轻量 HTTP 模式（默认）
+- **特点**：速度极快（数秒内完成），无需安装额外浏览器组件。
+- **解决 403 拦截**：由于 GitHub Actions 机房 IP 容易被 Cloudflare 拦截，推荐配合免费的 Vercel 反向代理使用。
+  - 在 Vercel 新建项目，根目录配置 `vercel.json`：
+    ```json
+    {
+      "rewrites": [
+        { "source": "/:path*", "destination": "https://xsijishe.com/:path*" }
+      ]
+    }
+    ```
+  - 将生成的域名填入 GitHub Secrets 的 `VERCEL_PROXY_URL`。
+
+### 路线二：无头浏览器过盾模式（推荐，遇 403 启用）
+- **特点**：通过 Playwright 驱动无头 Chromium，完整执行 Cloudflare 客户端 JavaScript 质询并获取通行凭证后完成签到。
+- **启用方式**（满足任意一种即可）：
+  1. **全局启用**：在 GitHub Secrets 或 Variables 中添加 `USE_BROWSER=true`。
+  2. **手动单次启用**：在 GitHub Actions 页面点击 **Run workflow** 时，勾选 **启用无头浏览器过盾模式 (Playwright)**。
+  3. **账号级启用**：在 `COOKIE_XSIJISHE` 对应账号行加入 `mode=browser;`。
 
 ---
 
 ## 本地运行与开发调试
 
-### 1. 安装依赖
+本项目支持标准 `Python` 以及现代极速包管理器 `uv`。
+
+### 方式一：标准 Python 模式
 
 ```bash
+# 1. 克隆代码
 git clone https://github.com/your-username/Xsijishe-Auto-Check-In.git
 cd Xsijishe-Auto-Check-In
 
+# 2. 创建并激活虚拟环境
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
+
+# 3. 安装开发依赖
 pip install -r requirements-dev.txt
-```
 
-### 2. 本地执行
+# 若需要使用无头浏览器模式，额外安装：
+pip install playwright
+playwright install chromium
 
-```bash
+# 4. 设置环境变量并执行
 # Windows PowerShell
 $env:COOKIE_XSIJISHE = "user=我的账号; cookie=SgL6_2132_saltkey=...; SgL6_2132_auth=...;"
 python checkIn_Xsijishe.py
@@ -119,12 +130,33 @@ python checkIn_Xsijishe.py
 # Linux / macOS
 export COOKIE_XSIJISHE="user=我的账号; cookie=SgL6_2132_saltkey=...; SgL6_2132_auth=...;"
 python checkIn_Xsijishe.py
+
+# 5. 运行单元测试
+pytest -v
 ```
 
-### 3. 运行单元测试
+### 方式二：uv 极速模式（推荐）
 
 ```bash
-pytest -v
+# 1. 创建环境并安装依赖
+uv venv
+uv pip install -r requirements-dev.txt
+
+# 若需要使用无头浏览器模式，额外安装：
+uv pip install playwright
+uv run playwright install chromium
+
+# 2. 本地执行脚本
+# Windows PowerShell
+$env:COOKIE_XSIJISHE = "user=我的账号; cookie=SgL6_2132_saltkey=...; SgL6_2132_auth=...;"
+uv run checkIn_Xsijishe.py
+
+# 开启无头浏览器模式运行
+$env:USE_BROWSER = "true"
+uv run checkIn_Xsijishe.py
+
+# 3. 执行测试
+uv run pytest -v
 ```
 
 ---
@@ -134,12 +166,12 @@ pytest -v
 ### 1. 提示“账号 Cookie 已失效或未登录”
 Discuz! 的鉴权 Cookie 在密码修改、账号注销或到期后会失效。请重新在浏览器登录并抓取最新 Cookie 更新至 GitHub Secret。
 
-### 2. 正常运行几天后忽然提示“HTTP 403 - 触发 Cloudflare 5秒盾/人机质询”
-* **原因**：目标站点临时开启或加固了 Cloudflare 防护策略（Under Attack Mode 或针对性风控）。Cloudflare 通过签发 `cf_clearance` 凭据放行通过人机验证的请求，该凭据有一定有效期，且与通过验证时的**出网 IP** 及**浏览器 User-Agent** 存在强校验关系。
-* **解决办法**：
-  1. 在电脑端浏览器打开论坛，正常通过人机验证加载页面。
-  2. 按照上文步骤重新抓取最新的完整 Cookie（确保包含最新的 `cf_clearance` 字段），更新到 GitHub Secrets 的 `COOKIE_XSIJISHE`。
-  3. 若你使用的浏览器不是主流 Chrome，建议在 GitHub Secrets 中同时配置 `USER_AGENT`（值为你浏览器的完整 UA），确保与 `cf_clearance` 严格匹配。
+### 2. 提示“HTTP 403 - 触发 Cloudflare 5秒盾/人机质询”
+- **原因**：目标站点加固了安全防护策略，对公有云数据中心 IP 进行了严格的 Turnstile 质询。
+- **解决方案**：
+  - **方案 A（推荐，一键解决）**：在 GitHub Secrets 中添加变量 `USE_BROWSER=true`，切换为无头浏览器模式，自动执行 JS 质询过盾。
+  - **方案 B**：配置 `VERCEL_PROXY_URL` 使用反向代理或配置 `PROXY` 使用住宅代理。
+  - **方案 C**：在本地浏览器通过人机验证后，重新抓取带有最新 `cf_clearance` 字段的完整 Cookie 更新至 Secret（有效期一小时左右）。
 
 ### 3. GitHub Actions 没有准点执行
 GitHub Actions 的定时触发任务受全局队列调度影响，通常会有数分钟至数十分钟的排队延迟，属平台正常现象。本项目已配置 12:30 自动兜底重试以保障签到成功率。

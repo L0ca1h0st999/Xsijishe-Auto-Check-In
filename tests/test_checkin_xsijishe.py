@@ -266,6 +266,44 @@ class XsijisheWorkflowTests(unittest.TestCase):
             else:
                 os.environ.pop("HTTPS_PROXY", None)
 
+    def test_parse_account_with_mode(self):
+        entry = "user=老司机; cookie=SgL6_2132_auth=123; mode=browser;"
+        acc = parse_account(entry, 1)
+        self.assertEqual(acc["user"], "老司机")
+        self.assertEqual(acc["mode"], "browser")
+        self.assertIn("SgL6_2132_auth=123", acc["cookie"])
+        self.assertNotIn("mode=", acc["cookie"])
+
+    def test_browser_mode_resolution(self):
+        # Default is False
+        c1 = Xsijishe({"user": "测试", "cookie": "a=1"})
+        self.assertFalse(c1.use_browser)
+
+        # Account mode=browser
+        c2 = Xsijishe({"user": "测试", "cookie": "a=1", "mode": "browser"})
+        self.assertTrue(c2.use_browser)
+
+        # USE_BROWSER=true env
+        with unittest.mock.patch.dict(os.environ, {"USE_BROWSER": "true"}):
+            c3 = Xsijishe({"user": "测试", "cookie": "a=1"})
+            self.assertTrue(c3.use_browser)
+
+            # Account mode=http overrides env
+            c4 = Xsijishe({"user": "测试", "cookie": "a=1", "mode": "http"})
+            self.assertFalse(c4.use_browser)
+
+        # SIGN_MODE=browser env
+        with unittest.mock.patch.dict(os.environ, {"SIGN_MODE": "browser"}):
+            c5 = Xsijishe({"user": "测试", "cookie": "a=1"})
+            self.assertTrue(c5.use_browser)
+
+    def test_browser_mode_missing_playwright_raises(self):
+        client = Xsijishe({"user": "测试", "cookie": "a=1", "mode": "browser"})
+        with unittest.mock.patch.dict(sys.modules, {"playwright.sync_api": None}):
+            with self.assertRaises(XsijisheAPIError) as ctx:
+                client.do_sign_browser()
+            self.assertIn("未检测到 playwright 依赖", str(ctx.exception))
+
 
 class MainIntegrationTests(unittest.TestCase):
     def test_main_all_success(self):
@@ -302,6 +340,31 @@ class MainIntegrationTests(unittest.TestCase):
         self.assertEqual(code, 1)
         output = buf.getvalue()
         self.assertIn("成功 1，失败 1", output)
+
+    def test_main_diagnostics_output(self):
+        buf = io.StringIO()
+        with unittest.mock.patch("checkIn_Xsijishe.check_network_connectivity") as mock_diag:
+            mock_diag.return_value = {
+                "access_mode": "直连目标站点 (https://xsijishe.com)",
+                "local_ip": "1.1.1.1",
+                "remote_ips": "104.21.85.91",
+                "tcp_status": "正常 (握手延迟: 20ms)",
+                "gateway_status": "HTTP 200 正常",
+            }
+
+            class MockClient:
+                def __init__(self, account):
+                    pass
+
+                def do_sign(self):
+                    return "✅ 签到成功"
+
+            with redirect_stdout(buf):
+                with unittest.mock.patch.dict(os.environ, {"USE_BROWSER": "true"}):
+                    main("user=A; cookie=123", client_factory=MockClient, skip_diagnostics=False)
+            output = buf.getvalue()
+            self.assertIn("网络环境与连通性诊断", output)
+            self.assertIn("无头浏览器过盾模式 (Playwright)", output)
 
 
 if __name__ == "__main__":

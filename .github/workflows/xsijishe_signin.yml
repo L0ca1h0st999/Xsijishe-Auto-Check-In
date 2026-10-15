@@ -5,6 +5,12 @@ on:
     - cron: "30 0 * * *" # 北京时间 08:30
     - cron: "30 4 * * *" # 北京时间 12:30，失败重试兜底
   workflow_dispatch:
+    inputs:
+      use_browser:
+        description: "启用无头浏览器过盾模式 (Playwright)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -58,9 +64,22 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: 安装依赖
+      - name: 安装基础依赖
         if: steps.cache-success.outputs.cache-hit != 'true'
         run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: 安装浏览器过盾依赖 (仅在启用浏览器模式时)
+        if: steps.cache-success.outputs.cache-hit != 'true'
+        env:
+          USE_BROWSER: ${{ inputs.use_browser || secrets.USE_BROWSER || vars.USE_BROWSER || 'false' }}
+        run: |
+          if [ "$USE_BROWSER" = "true" ] || [ "$USE_BROWSER" = "1" ] || [ "$USE_BROWSER" = "yes" ]; then
+            echo "已配置启用无头浏览器模式，正在安装 Playwright 及 Chromium 内核..."
+            python -m pip install --disable-pip-version-check playwright
+            playwright install chromium --with-deps
+          else
+            echo "未启用无头浏览器模式，跳过浏览器依赖安装。"
+          fi
 
       - name: 执行签到脚本
         if: steps.cache-success.outputs.cache-hit != 'true'
@@ -71,6 +90,7 @@ jobs:
           PROXY_URL: ${{ secrets.PROXY_URL }}
           CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
           PROXY: ${{ secrets.PROXY }}
+          USE_BROWSER: ${{ inputs.use_browser || secrets.USE_BROWSER || vars.USE_BROWSER || 'false' }}
         run: python checkIn_Xsijishe.py
 
       - name: 生成今日成功标记
