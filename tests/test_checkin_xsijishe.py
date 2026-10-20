@@ -304,6 +304,156 @@ class XsijisheWorkflowTests(unittest.TestCase):
                 client.do_sign_browser()
             self.assertIn("未检测到 playwright 依赖", str(ctx.exception))
 
+    def test_do_sign_browser_already_signed(self):
+        client = Xsijishe({"user": "测试", "cookie": "dummy=1", "mode": "browser"})
+
+        mock_page = MagicMock()
+        mock_page.title.return_value = "签到中心"
+        mock_page.content.return_value = (
+            '<html><input id="lxdays" value="10" /><input id="lxlevel" value="2" />'
+            '<input id="lxreward" value="5" /><input id="lxtdays" value="20" /></html>'
+        )
+        mock_btn_visted = MagicMock()
+        mock_btn_visted.count.return_value = 1
+        mock_page.locator.side_effect = lambda sel: mock_btn_visted if ".btnvisted" in sel else MagicMock(count=lambda: 0)
+
+        mock_context = MagicMock()
+        mock_context.new_page.return_value = mock_page
+        mock_browser = MagicMock()
+        mock_browser.new_context.return_value = mock_context
+        mock_playwright = MagicMock()
+        mock_playwright.chromium.launch.return_value = mock_browser
+
+        with unittest.mock.patch("playwright.sync_api.sync_playwright") as mock_sync:
+            mock_sync.return_value.__enter__.return_value = mock_playwright
+            result = client.do_sign_browser(wait_after_sign=0)
+
+        self.assertIn("今日已签到，无需重复打卡", result)
+        self.assertIn("连续签到：10 天", result)
+
+    def test_do_sign_browser_button_disappears_after_click(self):
+        """Simulate the exact bug: #JD_sign is replaced by .btnvisted after click."""
+        client = Xsijishe({"user": "测试", "cookie": "dummy=1", "mode": "browser"})
+
+        mock_page = MagicMock()
+        mock_page.title.return_value = "签到中心"
+        mock_page.content.return_value = (
+            '<html><input id="lxdays" value="11" /><input id="lxlevel" value="2" />'
+            '<input id="lxreward" value="5" /><input id="lxtdays" value="21" /></html>'
+        )
+
+        state = {"signed": False}
+
+        def mock_locator(selector):
+            loc = MagicMock()
+            if "#JD_sign" in selector and ".haveread" not in selector:
+                if not state["signed"]:
+                    loc.count.return_value = 1
+                    btn = MagicMock()
+                    def do_click(**kwargs):
+                        state["signed"] = True
+                    btn.click.side_effect = do_click
+                    btn.inner_text.return_value = "签到"
+                    btn.get_attribute.return_value = "btn"
+                    loc.first = btn
+                else:
+                    # After click, #JD_sign is removed from DOM!
+                    loc.count.return_value = 0
+                    btn = MagicMock()
+                    # If inner_text is called on missing element, simulate Playwright TimeoutError
+                    btn.inner_text.side_effect = TimeoutError("Timeout 30000ms exceeded. waiting for locator('#JD_sign').first")
+                    loc.first = btn
+                return loc
+            elif ".btnvisted" in selector:
+                loc.count.return_value = 1 if state["signed"] else 0
+                btn = MagicMock()
+                btn.inner_text.return_value = "今日已签"
+                loc.first = btn
+                return loc
+            elif "#lxdays" in selector:
+                loc.count.return_value = 1
+                loc.first.get_attribute.return_value = "11"
+                return loc
+            loc.count.return_value = 0
+            return loc
+
+        mock_page.locator.side_effect = mock_locator
+        # Simulate expect_response timing out
+        mock_page.expect_response.side_effect = Exception("Timeout waiting for response")
+
+        mock_context = MagicMock()
+        mock_context.new_page.return_value = mock_page
+        mock_browser = MagicMock()
+        mock_browser.new_context.return_value = mock_context
+        mock_playwright = MagicMock()
+        mock_playwright.chromium.launch.return_value = mock_browser
+
+        with unittest.mock.patch("playwright.sync_api.sync_playwright") as mock_sync:
+            mock_sync.return_value.__enter__.return_value = mock_playwright
+            result = client.do_sign_browser(wait_after_sign=0)
+
+        self.assertIn("签到结果：签到成功", result)
+        self.assertIn("连续签到：11 天", result)
+
+    def test_do_sign_browser_with_reward_captured(self):
+        """Simulate capturing the reward message via expect_response."""
+        client = Xsijishe({"user": "测试", "cookie": "dummy=1", "mode": "browser"})
+
+        mock_page = MagicMock()
+        mock_page.title.return_value = "签到中心"
+        mock_page.content.return_value = (
+            '<html><input id="lxdays" value="12" /><input id="lxlevel" value="2" />'
+            '<input id="lxreward" value="100" /><input id="lxtdays" value="22" /></html>'
+        )
+
+        mock_jd_sign = MagicMock()
+        mock_jd_sign.count.return_value = 1
+        sign_btn = MagicMock()
+        mock_jd_sign.first = sign_btn
+
+        def mock_locator(selector):
+            if "#JD_sign" in selector:
+                return mock_jd_sign
+            elif "#lxdays" in selector:
+                loc = MagicMock()
+                loc.count.return_value = 1
+                loc.first.get_attribute.return_value = "12"
+                return loc
+            loc = MagicMock()
+            loc.count.return_value = 0
+            return loc
+
+        mock_page.locator.side_effect = mock_locator
+
+        # Mock expect_response context manager
+        mock_resp = MagicMock()
+        mock_resp.text.return_value = "签到成功 获得随机奖励 100车票 和 。 已累计签到 22 天。"
+        mock_resp_info = MagicMock()
+        mock_resp_info.value = mock_resp
+
+        class MockExpectResponse:
+            def __enter__(self):
+                return mock_resp_info
+            def __exit__(self, *args):
+                pass
+
+        mock_page.expect_response.return_value = MockExpectResponse()
+
+        mock_context = MagicMock()
+        mock_context.new_page.return_value = mock_page
+        mock_browser = MagicMock()
+        mock_browser.new_context.return_value = mock_context
+        mock_playwright = MagicMock()
+        mock_playwright.chromium.launch.return_value = mock_browser
+
+        with unittest.mock.patch("playwright.sync_api.sync_playwright") as mock_sync:
+            mock_sync.return_value.__enter__.return_value = mock_playwright
+            result = client.do_sign_browser(wait_after_sign=0)
+
+        self.assertIn("签到结果：签到成功，获得奖励：100车票 （已累计签到 22 天）", result)
+        self.assertIn("连续签到：12 天", result)
+
+
 
 class MainIntegrationTests(unittest.TestCase):
     def test_main_all_success(self):

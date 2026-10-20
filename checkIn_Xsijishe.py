@@ -572,7 +572,8 @@ class Xsijishe:
 
                 def handle_response(response):
                     try:
-                        if "k_misign" in response.url and "qiandao" in response.url:
+                        url_lower = response.url.lower()
+                        if ("k_misign" in url_lower and "qiandao" in url_lower) or ("plugin.php" in url_lower and "sign" in url_lower and "qiandao" in url_lower):
                             resp_text = response.text()
                             clean_msg = Xsijishe.clean_sign_response(resp_text)
                             if clean_msg:
@@ -612,18 +613,26 @@ class Xsijishe:
                 username = self.user
                 vwmy = page.locator("strong.vwmy a, a.author")
                 if vwmy.count() > 0:
-                    nick = vwmy.first.inner_text().strip()
-                    if nick:
-                        username = f"{self.user} ({nick})"
+                    try:
+                        nick = vwmy.first.inner_text(timeout=3000).strip()
+                        if nick:
+                            username = f"{self.user} ({nick})"
+                    except Exception:
+                        pass
 
                 # Check if already signed today
                 already_signed = False
                 if btn_visted.count() > 0 or "今日已签" in content or "btnvisted" in content:
                     already_signed = True
                 elif jd_sign.count() > 0:
-                    sign_btn = jd_sign.first
-                    sign_text = sign_btn.inner_text()
-                    sign_class = sign_btn.get_attribute("class") or ""
+                    try:
+                        sign_text = jd_sign.first.inner_text(timeout=3000)
+                    except Exception:
+                        sign_text = ""
+                    try:
+                        sign_class = jd_sign.first.get_attribute("class", timeout=3000) or ""
+                    except Exception:
+                        sign_class = ""
                     if "今日已签" in sign_text or "haveread" in sign_class or "btnvisted" in sign_class or "signed" in sign_class:
                         already_signed = True
                 elif page.locator("#lxdays, .qdleft, .qdright").count() > 0:
@@ -636,29 +645,85 @@ class Xsijishe:
                     if jd_sign.count() == 0:
                         raise XsijisheAPIError(f"未能在页面找到签到按钮 (页面标题: {title})")
                     sign_btn = jd_sign.first
-                    sign_btn.click()
-                    if wait_after_sign > 0:
-                        time.sleep(wait_after_sign)
 
+                    clicked = False
+                    try:
+                        with page.expect_response(
+                            lambda r: ("k_misign" in r.url.lower() and "qiandao" in r.url.lower())
+                            or ("plugin.php" in r.url.lower() and "sign" in r.url.lower()),
+                            timeout=8000,
+                        ) as resp_info:
+                            sign_btn.click(timeout=5000)
+                            clicked = True
+                        resp = resp_info.value
+                        clean_msg = Xsijishe.clean_sign_response(resp.text())
+                        if clean_msg:
+                            captured_sign_rewards.append(clean_msg)
+                    except Exception:
+                        if not clicked:
+                            try:
+                                sign_btn.click(timeout=5000)
+                            except Exception:
+                                pass
+
+                    if wait_after_sign > 0:
+                        try:
+                            page.wait_for_timeout(wait_after_sign * 1000)
+                        except Exception:
+                            time.sleep(wait_after_sign)
+
+                    # Determine sign-in result safely without assuming #JD_sign still exists
                     if captured_sign_rewards:
                         status_line = f"🎉 签到结果：{captured_sign_rewards[-1]}"
                     else:
-                        sign_text = sign_btn.inner_text()
-                        sign_class = sign_btn.get_attribute("class") or ""
-                        if "今日已签" in sign_text or "haveread" in sign_class or "btnvisted" in sign_class or "signed" in sign_class:
+                        page_content_after = page.content()
+                        visted_loc = page.locator(".btnvisted, .btn_haveread, .J_haveread")
+
+                        visted_text = ""
+                        if visted_loc.count() > 0:
+                            try:
+                                visted_text = visted_loc.first.inner_text(timeout=2000)
+                            except Exception:
+                                visted_text = ""
+
+                        sign_text = ""
+                        sign_class = ""
+                        if jd_sign.count() > 0:
+                            try:
+                                sign_text = jd_sign.first.inner_text(timeout=2000)
+                                sign_class = jd_sign.first.get_attribute("class", timeout=2000) or ""
+                            except Exception:
+                                sign_text = ""
+                                sign_class = ""
+
+                        if (
+                            visted_loc.count() > 0
+                            or "今日已签" in page_content_after
+                            or "今日已签" in visted_text
+                            or "今日已签" in sign_text
+                            or "haveread" in sign_class
+                            or "btnvisted" in sign_class
+                            or "signed" in sign_class
+                            or jd_sign.count() == 0  # Button was replaced/removed after sign-in
+                        ):
                             status_line = "🎉 签到结果：签到成功"
-                        else:
+                        elif sign_text:
                             clean_text = Xsijishe.clean_sign_response(sign_text)
                             status_line = f"🎉 签到结果：{clean_text or '签到请求已提交'}"
+                        else:
+                            status_line = "🎉 签到结果：签到请求已提交"
 
                 # Extract check-in statistics
                 stats = {}
                 for stat_id in ("lxdays", "lxlevel", "lxreward", "lxtdays"):
                     loc = page.locator(f"#{stat_id}")
                     if loc.count() > 0:
-                        val = loc.first.get_attribute("value")
-                        if val is not None and val.strip():
-                            stats[stat_id] = val.strip()
+                        try:
+                            val = loc.first.get_attribute("value", timeout=2000)
+                            if val is not None and val.strip():
+                                stats[stat_id] = val.strip()
+                        except Exception:
+                            pass
 
                 if not stats.get("lxdays"):
                     stats = self._parse_stats(page.content())
