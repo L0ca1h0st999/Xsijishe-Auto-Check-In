@@ -304,6 +304,18 @@ class XsijisheWorkflowTests(unittest.TestCase):
                 client.do_sign_browser()
             self.assertIn("未检测到 playwright 依赖", str(ctx.exception))
 
+    @staticmethod
+    def _mock_playwright_context(mock_playwright):
+        mock_sync_api = MagicMock()
+        mock_sync_api.sync_playwright.return_value.__enter__.return_value = mock_playwright
+        return unittest.mock.patch.dict(
+            sys.modules,
+            {
+                "playwright": MagicMock(),
+                "playwright.sync_api": mock_sync_api,
+            },
+        )
+
     def test_do_sign_browser_already_signed(self):
         client = Xsijishe({"user": "测试", "cookie": "dummy=1", "mode": "browser"})
 
@@ -324,8 +336,7 @@ class XsijisheWorkflowTests(unittest.TestCase):
         mock_playwright = MagicMock()
         mock_playwright.chromium.launch.return_value = mock_browser
 
-        with unittest.mock.patch("playwright.sync_api.sync_playwright") as mock_sync:
-            mock_sync.return_value.__enter__.return_value = mock_playwright
+        with self._mock_playwright_context(mock_playwright):
             result = client.do_sign_browser(wait_after_sign=0)
 
         self.assertIn("今日已签到，无需重复打卡", result)
@@ -388,8 +399,7 @@ class XsijisheWorkflowTests(unittest.TestCase):
         mock_playwright = MagicMock()
         mock_playwright.chromium.launch.return_value = mock_browser
 
-        with unittest.mock.patch("playwright.sync_api.sync_playwright") as mock_sync:
-            mock_sync.return_value.__enter__.return_value = mock_playwright
+        with self._mock_playwright_context(mock_playwright):
             result = client.do_sign_browser(wait_after_sign=0)
 
         self.assertIn("签到结果：签到成功", result)
@@ -446,8 +456,7 @@ class XsijisheWorkflowTests(unittest.TestCase):
         mock_playwright = MagicMock()
         mock_playwright.chromium.launch.return_value = mock_browser
 
-        with unittest.mock.patch("playwright.sync_api.sync_playwright") as mock_sync:
-            mock_sync.return_value.__enter__.return_value = mock_playwright
+        with self._mock_playwright_context(mock_playwright):
             result = client.do_sign_browser(wait_after_sign=0)
 
         self.assertIn("签到结果：签到成功，获得奖励：100车票 （已累计签到 22 天）", result)
